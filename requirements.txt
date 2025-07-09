@@ -1,0 +1,8 @@
+aiogram
+fastapi
+uvicorn
+sqlalchemy
+apscheduler
+pydantic
+tronpy
+Jinja2
