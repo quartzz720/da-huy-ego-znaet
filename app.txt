@@ -1,0 +1,468 @@
+import os
+import json
+import requests
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from hashlib import md5
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, TIT2, TPE1, TALB
+
+class SoundCloudDownloader:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("SoundCloud Bulk Downloader")
+        self.root.geometry("800x600")
+        self.root.configure(bg='#121212')
+        self.root.minsize(700, 500)
+        
+        # Configuration
+        self.client_id = ""
+        self.save_path = r"C:\parsing"
+        self.downloaded_tracks = set()
+        self.current_offset = 0
+        self.batch_size = 20
+        self.running = False
+        self.total_downloaded = 0
+        
+        # Load config if exists
+        self.load_config()
+        
+        # UI Setup
+        self.setup_ui()
+        
+        # Dark theme colors
+        self.bg_color = '#121212'
+        self.fg_color = '#ffffff'
+        self.accent_color = '#1db954'
+        self.secondary_color = '#535353'
+        self.text_color = '#b3b3b3'
+        
+        # Apply styles
+        self.apply_styles()
+
+    def setup_ui(self):
+        # Main container
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Header
+        self.header_frame = ttk.Frame(self.main_frame)
+        self.header_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.title_label = ttk.Label(
+            self.header_frame, 
+            text="SoundCloud Bulk Downloader", 
+            font=('Helvetica', 16, 'bold')
+        )
+        self.title_label.pack(side=tk.LEFT)
+        
+        # Settings frame
+        self.settings_frame = ttk.LabelFrame(
+            self.main_frame, 
+            text="Settings", 
+            padding=(10, 5)
+        self.settings_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Client ID
+        ttk.Label(
+            self.settings_frame, 
+            text="Client ID:"
+        ).grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
+        
+        self.client_id_entry = ttk.Entry(
+            self.settings_frame, 
+            width=40
+        )
+        self.client_id_entry.grid(row=0, column=1, sticky=tk.EW, padx=5, pady=2)
+        self.client_id_entry.insert(0, self.client_id)
+        
+        # Save path
+        ttk.Label(
+            self.settings_frame, 
+            text="Save Path:"
+        ).grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
+        
+        self.path_entry = ttk.Entry(
+            self.settings_frame, 
+            width=40
+        )
+        self.path_entry.grid(row=1, column=1, sticky=tk.EW, padx=5, pady=2)
+        self.path_entry.insert(0, self.save_path)
+        
+        self.browse_btn = ttk.Button(
+            self.settings_frame, 
+            text="Browse", 
+            command=self.browse_folder
+        )
+        self.browse_btn.grid(row=1, column=2, padx=5, pady=2)
+        
+        # Batch size
+        ttk.Label(
+            self.settings_frame, 
+            text="Batch Size:"
+        ).grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        
+        self.batch_size_entry = ttk.Entry(
+            self.settings_frame, 
+            width=10
+        )
+        self.batch_size_entry.grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
+        self.batch_size_entry.insert(0, str(self.batch_size))
+        
+        # Controls frame
+        self.controls_frame = ttk.Frame(self.main_frame)
+        self.controls_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.start_btn = ttk.Button(
+            self.controls_frame, 
+            text="Start Download", 
+            command=self.start_download,
+            style='Accent.TButton'
+        )
+        self.start_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.stop_btn = ttk.Button(
+            self.controls_frame, 
+            text="Stop", 
+            command=self.stop_download,
+state=tk.DISABLED
+        )
+        self.stop_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.analyze_btn = ttk.Button(
+            self.controls_frame, 
+            text="Analyze for Duplicates", 
+            command=self.analyze_duplicates
+        )
+        self.analyze_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # Progress frame
+        self.progress_frame = ttk.LabelFrame(
+            self.main_frame, 
+            text="Progress", 
+            padding=(10, 5)
+        self.progress_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Progress bar
+        self.progress_bar = ttk.Progressbar(
+            self.progress_frame, 
+            orient=tk.HORIZONTAL, 
+            mode='determinate'
+        )
+        self.progress_bar.pack(fill=tk.X, pady=(0, 10))
+        
+        # Status label
+        self.status_label = ttk.Label(
+            self.progress_frame, 
+            text="Ready to start...",
+            wraplength=700
+        )
+        self.status_label.pack(fill=tk.X, pady=(0, 5))
+        
+        # Log text
+        self.log_text = tk.Text(
+            self.progress_frame, 
+            height=10, 
+            state=tk.DISABLED,
+            bg='#1e1e1e',
+            fg='#ffffff',
+            insertbackground='white',
+            selectbackground='#535353'
+        )
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        
+        # Configure grid weights
+        self.settings_frame.columnconfigure(1, weight=1)
+        
+    def apply_styles(self):
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        # Configure colors
+        style.configure('.', background=self.bg_color, foreground=self.fg_color)
+        style.configure('TFrame', background=self.bg_color)
+        style.configure('TLabel', background=self.bg_color, foreground=self.fg_color)
+        style.configure('TEntry', fieldbackground='#2d2d2d', foreground=self.fg_color)
+        style.configure('TButton', background=self.secondary_color, foreground=self.fg_color)
+        style.configure('TLabelframe', background=self.bg_color, foreground=self.accent_color)
+        style.configure('TLabelframe.Label', background=self.bg_color, foreground=self.accent_color)
+        
+        # Accent button
+        style.configure('Accent.TButton', background=self.accent_color, foreground='black')
+        
+        # Treeview (for future use)
+        style.configure('Treeview', 
+                       background='#2d2d2d', 
+                       foreground=self.fg_color, 
+                       fieldbackground='#2d2d2d')
+        style.map('Treeview', background=[('selected', '#535353')])
+        
+        # Scrollbar
+        style.configure('Vertical.TScrollbar', background=self.secondary_color)
+        
+    def browse_folder(self):
+        folder = filedialog.askdirectory()
+        if folder:
+            self.save_path = folder
+            self.path_entry.delete(0, tk.END)
+            self.path_entry.insert(0, folder)
+            self.save_config()
+    
+    def save_config(self):
+        config = {
+            'client_id': self.client_id_entry.get(),
+            'save_path': self.path_entry.get(),
+            'batch_size': self.batch_size_entry.get(),
+            'downloaded_tracks': list(self.downloaded_tracks)
+        }
+        with open('sc_downloader_config.json', 'w') as f:
+            json.dump(config, f)
+    
+    def load_config(self):
+        try:
+            with open('sc_downloader_config.json', 'r') as f:
+                config = json.load(f)
+                self.client_id = config.get('client_id', '')
+                self.save_path = config.get('save_path', r"C:\parsing")
+                self.batch_size = int(config.get('batch_size', 20))
+                self.downloaded_tracks = set(config.get('downloaded_tracks', []))
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+    
+    def log_message(self, message):
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.config(state=tk.DISABLED)
+        self.log_text.see(tk.END)
+self.root.update()
+    
+    def update_status(self, message):
+        self.status_label.config(text=message)
+        self.root.update()
+    
+    def get_track_info(self, track_id):
+        try:
+            api_url = f"https://api.soundcloud.com/tracks/{track_id}?client_id={self.client_id}"
+            response = requests.get(api_url)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self.log_message(f"Error getting track info: {e}")
+            return None
+    
+    def download_track(self, track_info):
+        try:
+            track_id = str(track_info['id'])
+            if track_id in self.downloaded_tracks:
+                return False, "Already downloaded"
+            
+            stream_url = f"{track_info['stream_url']}?client_id={self.client_id}"
+            valid_title = "".join(c for c in track_info['title'] if c.isalnum() or c in " -_")
+            save_path = os.path.join(self.save_path, f"{valid_title}.mp3")
+            
+            # Create directory if not exists
+            os.makedirs(self.save_path, exist_ok=True)
+            
+            # Download track
+            response = requests.get(stream_url, stream=True)
+            response.raise_for_status()
+            
+            with open(save_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Add ID3 tags
+            try:
+                audio = MP3(save_path, ID3=ID3)
+                audio.tags.add(TIT2(encoding=3, text=track_info['title']))
+                if 'user' in track_info:
+                    audio.tags.add(TPE1(encoding=3, text=track_info['user']['username']))
+                audio.save()
+            except Exception as e:
+                self.log_message(f"Couldn't add ID3 tags: {e}")
+            
+            self.downloaded_tracks.add(track_id)
+            return True, f"Downloaded: {track_info['title']}"
+        except Exception as e:
+            return False, f"Error downloading {track_info['title']}: {e}"
+    
+    def get_tracks_batch(self, offset=0):
+        try:
+            api_url = f"https://api.soundcloud.com/tracks?client_id={self.client_id}&limit={self.batch_size}&offset={offset}"
+            response = requests.get(api_url)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self.log_message(f"Error getting tracks batch: {e}")
+            return []
+    
+    def start_download(self):
+        if self.running:
+            return
+            
+        # Get settings from UI
+        self.client_id = self.client_id_entry.get()
+        self.save_path = self.path_entry.get()
+        try:
+            self.batch_size = int(self.batch_size_entry.get())
+        except ValueError:
+            messagebox.showerror("Error", "Batch size must be a number")
+            return
+            
+        if not self.client_id:
+            messagebox.showerror("Error", "Client ID is required")
+            return
+            
+        self.save_config()
+        self.running = True
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self.total_downloaded = 0
+        
+        # Start download in a new thread
+        import threading
+        threading.Thread(target=self.download_process, daemon=True).start()
+    
+    def stop_download(self):
+        self.running = False
+        self.stop_btn.config(state=tk.DISABLED)
+        self.start_btn.config(state=tk.NORMAL)
+        self.update_status("Download stopped by user")
+    
+    def download_process(self):
+        self.log_message("Starting download process...")
+        self.current_offset = 0
+        
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            while self.running:
+                # Get batch of tracks
+                self.update_status(f"Fetching tracks batch (offset: {self.current_offset})...")
+                tracks = self.get_tracks_batch(self.current_offset)
+if not tracks:
+                    self.log_message("No more tracks found or reached API limit")
+                    break
+                
+                # Filter out already downloaded tracks
+                new_tracks = [t for t in tracks if str(t['id']) not in self.downloaded_tracks]
+                
+                if not new_tracks:
+                    self.log_message("No new tracks in this batch")
+                    self.current_offset += self.batch_size
+                    continue
+                
+                self.log_message(f"Found {len(new_tracks)} new tracks in this batch")
+                
+                # Download all tracks in parallel
+                futures = [executor.submit(self.download_track, track) for track in new_tracks]
+                
+                for future in as_completed(futures):
+                    success, message = future.result()
+                    self.log_message(message)
+                    if success:
+                        self.total_downloaded += 1
+                        self.progress_bar['value'] = self.total_downloaded
+                        self.root.update()
+                
+                self.current_offset += self.batch_size
+                self.save_config()
+                
+                # Check if we should continue
+                if len(tracks) < self.batch_size:
+                    break
+        
+        if self.running:
+            self.update_status(f"Download completed! Total downloaded: {self.total_downloaded}")
+            self.log_message("All available tracks have been processed")
+            self.running = False
+            self.start_btn.config(state=tk.NORMAL)
+            self.stop_btn.config(state=tk.DISABLED)
+            
+            # Offer to analyze for duplicates
+            if messagebox.askyesno(
+                "Analysis", 
+                "Download completed. Would you like to analyze for duplicate tracks now?"
+            ):
+                self.analyze_duplicates()
+    
+    def analyze_duplicates(self):
+        if not os.path.exists(self.save_path):
+            messagebox.showerror("Error", "Save directory doesn't exist")
+            return
+            
+        self.update_status("Analyzing for duplicate tracks...")
+        self.log_message("Starting duplicate analysis...")
+        
+        # This will be slow for large collections, so we'll do it in a thread
+        import threading
+        threading.Thread(target=self._perform_duplicate_analysis, daemon=True).start()
+    
+    def _perform_duplicate_analysis(self):
+        try:
+            # First pass: group by file size (quick check)
+            size_map = {}
+            for filename in os.listdir(self.save_path):
+                if filename.endswith('.mp3'):
+                    filepath = os.path.join(self.save_path, filename)
+                    size = os.path.getsize(filepath)
+                    if size not in size_map:
+                        size_map[size] = []
+                    size_map[size].append(filepath)
+            
+            # Second pass: check files with same size
+            duplicates = []
+            for size, files in size_map.items():
+                if len(files) > 1:
+                    # Compare these files more thoroughly
+                    hash_map = {}
+                    for filepath in files:
+                        try:
+                            with open(filepath, 'rb') as f:
+                                file_hash = md5(f.read()).hexdigest()
+                            if file_hash not in hash_map:
+                                hash_map[file_hash] = []
+                            hash_map[file_hash].append(filepath)
+                        except Exception as e:
+                            self.log_message(f"Error analyzing {filepath}: {e}")
+                    
+                    # Find actual duplicates
+                    for file_hash, same_files in hash_map.items():
+                        if len(same_files) > 1:
+                            duplicates.append(same_files)
+if not duplicates:
+                self.log_message("No duplicate tracks found")
+                self.update_status("Analysis complete - no duplicates found")
+                return
+            
+            self.log_message(f"Found {len(duplicates)} sets of duplicates")
+            self.update_status(f"Found {len(duplicates)} sets of duplicates")
+            
+            # Show duplicates to user and ask which to keep
+            for i, dup_set in enumerate(duplicates, 1):
+                self.log_message(f"\nDuplicate set #{i}:")
+                for filepath in dup_set:
+                    self.log_message(f" - {os.path.basename(filepath)}")
+                
+                # In a real app, you'd have a more sophisticated UI for this
+                # Here we'll just keep the first one and delete others
+                keep = dup_set[0]
+                for filepath in dup_set[1:]:
+                    try:
+                        os.remove(filepath)
+                        self.log_message(f"Deleted duplicate: {os.path.basename(filepath)}")
+                    except Exception as e:
+                        self.log_message(f"Error deleting {filepath}: {e}")
+            
+            self.log_message("\nDuplicate cleanup completed")
+            self.update_status("Duplicate analysis and cleanup completed")
+            
+        except Exception as e:
+            self.log_message(f"Error during duplicate analysis: {e}")
+            self.update_status("Error during duplicate analysis")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SoundCloudDownloader(root)
+    root.mainloop()
